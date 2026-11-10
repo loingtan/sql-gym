@@ -1,0 +1,13 @@
+{
+  "name": "query-gym",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "verify": "node verify.js"
+  },
+  "dependencies": {
+    "marked": "^18.2.0",
+    "pg": "^8.23.1"
+  }
+}

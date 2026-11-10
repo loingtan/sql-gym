@@ -1,0 +1,31 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: practice
+      POSTGRES_DB: practice
+    # track_io_timing adds "I/O Timings" to EXPLAIN (BUFFERS); shared_buffers big enough to cache the lab data
+    command: postgres -c shared_buffers=512MB -c track_io_timing=on -c work_mem=8MB
+    # 127.0.0.1 only: the database user is a superuser with a well-known password
+    ports: ["127.0.0.1:${DB_PORT:-5433}:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h forces TCP: during the first-boot seed Postgres only listens on a socket, so this stays "unhealthy" until seeding is done
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
+      interval: 3s
+      retries: 200
+
+  app:
+    build: .
+    environment:
+      DATABASE_URL: postgres://postgres:practice@db:5432/practice
+    ports: ["127.0.0.1:${APP_PORT:-3000}:3000"]   # the app runs any SQL you type; keep it off the network
+    volumes:
+      - ./content:/app/content:ro   # edit or add lessons without rebuilding
+    depends_on:
+      db: { condition: service_healthy }
+
+volumes:
+  pgdata:
