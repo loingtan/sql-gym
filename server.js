@@ -37,6 +37,13 @@ const send = (res, status, type, data) => res.writeHead(status, { 'content-type'
 http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   const route = routes[`${req.method} ${url.pathname}`];
+  // The API runs arbitrary SQL, so only this page may call it. Host check stops DNS rebinding;
+  // Origin check stops other sites; JSON-only POSTs force a preflight this server never answers.
+  const host = req.headers.host ?? '';
+  const origin = req.headers.origin;
+  if (!/^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(host)) return send(res, 403, 'text/plain', 'Forbidden');
+  if (origin && origin !== `http://${host}`) return send(res, 403, 'text/plain', 'Forbidden');
+  if (req.method === 'POST' && !/^application\/json\b/.test(req.headers['content-type'] ?? '')) return send(res, 415, 'text/plain', 'JSON only');
   try {
     if (route) return send(res, 200, 'application/json', JSON.stringify(await route(await body(req))));
     const path = normalize(join(PUBLIC, url.pathname === '/' ? 'index.html' : url.pathname));
