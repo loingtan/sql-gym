@@ -1,12 +1,18 @@
 # Query Gym
 
-Practice SQL on a real PostgreSQL 17 with millions of rows. Two tracks:
+Practice SQL on a real PostgreSQL 17 with millions of rows. Three tracks:
 
 - **Performance Lab**: 10 rounds on `perf` (1M orders, 2.5M order items, no secondary indexes). Read the
   plan, add the right index or rewrite the query, beat the baseline. Every run is timed with
   `EXPLAIN (ANALYZE, BUFFERS)` and compared to the slow version.
 - **Antipatterns**: one chapter per chapter of *SQL Antipatterns, Vol. 1* (Bill Karwin), on the book's
   bug-tracker database. Theory, then exercises that make you fix the query or the schema, then a quiz.
+
+- **Connections & Pooling**: 5 rounds of real load tests, following
+  [this article](https://sagarshiroya.dev/posts/database-connection-and-pooling). You change pool
+  settings or the query; the app sends real requests through a real pool and shows waits, timeouts,
+  refused connections and a timeline. Covers connection cost, pool exhaustion, Little's Law, the
+  70–80% rule and pool size × instances vs `max_connections`.
 
 Styled after [gonnacrash.com](https://gonnacrash.com): rounds, concept cards you unlock, a progress page.
 
@@ -35,7 +41,7 @@ The **SQL console** (menu) runs anything against either schema, with an *Explain
 
 ## Writing lessons
 
-Lessons are Markdown in `content/perf/` and `content/antipatterns/`, hot-reloaded (the folder is mounted
+Lessons are Markdown in `content/perf/`, `content/antipatterns/` and `content/pooling/`, hot-reloaded (the folder is mounted
 into the container). Chapter-specific tables live in `db/1x-*.sql` and run on first boot; to add one to a
 running database: `docker compose exec -T db psql -U postgres -d practice < db/your.sql`.
 
@@ -60,6 +66,9 @@ require: regex | message shown as the goal
 ordered: true
 schema: perf           <- default is the track's schema
 kind: inject           <- SQL-injection lab: learner types an input for ```sql template with {{input}}
+kind: load             <- load test (loadlab.js): ```sql request is what each request runs; settings such as
+                          rate, duration_s, pool_max, instances, arrivals, warm; `tunable: pool_max` lists what
+                          the learner may change; `goal: wait_p95 <= 30 | message` checks a measurement
 ```
 > Hint: shown on demand, one at a time
 
@@ -79,6 +88,7 @@ Run it after editing a lesson.
 |---|---|
 | `server.js` | HTTP + JSON API, no framework |
 | `runner.js` | runs SQL in rolled-back transactions, times with EXPLAIN ANALYZE, compares results |
+| `loadlab.js` | load-test engine for the pooling track: real connections, pg.Pool, measurements |
 | `content.js` | parses lesson Markdown |
 | `public/` | the SPA: vanilla JS, hash routes |
 | `db/` | seed SQL: `01-perf` big tables, `02-bugs` the book's database, `1x-*` chapter tables |

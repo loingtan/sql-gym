@@ -14,7 +14,7 @@ for (const u of loadContent().units.filter(u => u.id.startsWith(prefix) || u.exe
   u.quiz.forEach((q, i) => q.options.some(o => o.correct) || fail(u.id, `quiz question ${i + 1} has no [x] option`));
 
   for (const ex of u.exercises.filter(e => e.id.startsWith(prefix))) {
-    if (!ex.reference) { fail(ex.id, 'no reference or baseline query'); continue; }
+    if (!ex.reference && ex.kind !== 'load') { fail(ex.id, 'no reference or baseline query'); continue; }
     if (ex.kind === 'query' && !ex.solution.query) { fail(ex.id, 'no solution query'); continue; }
     const t0 = Date.now();
     const r = await runExercise(ex, ex.solution);
@@ -23,7 +23,7 @@ for (const u of loadContent().units.filter(u => u.id.startsWith(prefix) || u.exe
     if (!r.passed) problems.push(`${ex.id}: solution does not pass`);
 
     // A starter that already passes means the exercise teaches nothing.
-    if (ex.kind === 'query' && ex.starter.query && (ex.speedup || ex.forbid.length || ex.require.length)) {
+    if (ex.kind === 'load' || (ex.kind === 'query' && ex.starter.query && (ex.speedup || ex.forbid.length || ex.require.length))) {
       const s = await runExercise(ex, ex.starter);
       if (s.passed) fail(ex.id, 'the starter query already passes; tighten speedup/forbid/require');
       else if (s.error) fail(ex.id, `starter errors: ${s.error}`);

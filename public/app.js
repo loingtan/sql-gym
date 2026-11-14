@@ -62,7 +62,7 @@ document.addEventListener('keydown', e => {
 });
 
 const routes = [
-  [/^#\/track\/(perf|ap)$/, trackPage],
+  [/^#\/track\/(perf|ap|pool)$/, trackPage],
   [/^#\/u\/([\w-]+)(?:\/(ex\/\d+|quiz))?$/, unitPage],
   [/^#\/console$/, consolePage],
   [/^#\/progress(?:\/(concepts))?$/, progressPage],
@@ -171,8 +171,8 @@ function homePage() {
     const ex = content.units.filter(u => u.track === track).flatMap(u => u.exercises);
     return [ex.filter(e => passed(e.id)).length, ex.length, content.units.filter(u => u.track === track).length];
   };
-  const [pd, pt, pn] = tally('perf'), [ad, at, an] = tally('ap');
-  setBar({ stats: [['SOLVED', `${pd + ad}/${pt + at}`], ['CONCEPTS', `${content.units.filter(unitDone).length}/${content.units.length}`]] });
+  const [pd, pt, pn] = tally('perf'), [ad, at, an] = tally('ap'), [ld, lt, ln] = tally('pool');
+  setBar({ stats: [['SOLVED', `${pd + ad + ld}/${pt + at + lt}`], ['CONCEPTS', `${content.units.filter(unitDone).length}/${content.units.length}`]] });
   const next = content.units.flatMap(u => u.exercises).find(e => !passed(e.id));
   const card = (track, title, text, done, total) => `
     <a class="island track-card" href="#/track/${track}">
@@ -197,6 +197,7 @@ function homePage() {
       <div class="tracks">
         ${card('perf', 'Performance Lab', `${pn} rounds on 1M orders and 2.5M order items with no secondary indexes. Find the slow step in the plan, fix it, beat the baseline.`, pd, pt)}
         ${card('ap', 'Antipatterns', `${an} chapters of SQL Antipatterns. Read the theory, then fix the query or the schema on the book's bug-tracker database.`, ad, at)}
+        ${card('pool', 'Connections & Pooling', `${ln} rounds of real load tests. Open connections, exhaust a pool, watch the queue, and size it with Little's Law.`, ld, lt)}
       </div>
       <div class="home-actions">
         ${next ? `<a class="run small" href="#/u/${next.unitId}/ex/${next.n}">Continue: ${esc(next.title)}</a>` : ''}
@@ -210,6 +211,7 @@ function homePage() {
 
 const TRACK_INTRO = {
   perf: 'Big tables, no secondary indexes and a stopwatch. Each round explains one idea, then hands you a slow query: return the same rows, many times faster.',
+  pool: 'What a connection costs and how a pool behaves under load. Each round runs a real load test against Postgres: you change the pool settings or the query, and the numbers have to meet the goals.',
   ap: 'Each chapter follows the book: the goal, the antipattern, how to spot it, when it is fine, and the fix. Then you practice on the bug-tracker database.',
 };
 
@@ -248,7 +250,7 @@ function unitPage(id, sub) {
   const ex = exN ? u.exercises[exN - 1] : null;
   if (exN && !ex) return notFound();
   const tab = ex ? `ex/${exN}` : sub === 'quiz' ? 'quiz' : 'theory';
-  const label = u.track === 'perf' ? 'ROUND' : 'CHAPTER';
+  const label = u.track === 'ap' ? 'CHAPTER' : 'ROUND';
   const tabs = [
     ['theory', 'Theory', false],
     ...u.exercises.map((e, i) => [`ex/${i + 1}`, u.exercises.length > 1 ? `Exercise ${i + 1}` : 'Exercise', passed(e.id)]),
@@ -271,13 +273,13 @@ function unitPage(id, sub) {
 function exerciseView(u, ex, head, label) {
   const key = `qg:draft:${ex.id}`;
   const draft = store.get(key) ?? { setup: ex.starter.setup, query: ex.starter.query };
-  const inject = ex.kind === 'inject';
+  const inject = ex.kind === 'inject', load = ex.kind === 'load';
   const best = progress.get(ex.id);
-  const stats = r => ex.baseline
+  const stats = r => load ? loadStats(label, u, ex, r) : ex.baseline
     ? [[label, `${u.number}.${ex.n}`], ['BASELINE', fmtMs(r?.baseline?.ms)], ['YOURS', fmtMs(r?.ms)],
        r ? ['SPEEDUP', fmtX(r.speedup), r.passed ? 'big' : ''] : ['BEST', best?.best_speedup ? fmtX(best.best_speedup) : '—', best ? 'ok' : '']]
     : [[label, `${u.number}.${ex.n}`], ['TIME', fmtMs(r?.ms)], ['ROWS', r && !r.error ? fmtN(r.rowCount) : '—'], ['STATUS', passed(ex.id) ? 'solved' : 'open', passed(ex.id) ? 'ok' : '']];
-  const goals = [
+  const goals = load ? [...(ex.editQuery ? ['Return the same rows as the original request'] : []), ...ex.goals.map(g => g.msg)] : [
     inject ? 'Make the unsafe query return the target rows' : 'Return the same rows as the expected result',
     ex.speedup && `Be at least ${ex.speedup}× faster than the baseline`,
     ...ex.forbid.map(f => `No ${f} in the plan`),
@@ -285,7 +287,7 @@ function exerciseView(u, ex, head, label) {
     ex.ordered && 'Row order matters',
   ].filter(Boolean);
 
-  const editors = inject ? `
+  const editors = load ? loadEditors(ex, draft) : inject ? `
       <div class="island ed"><div class="ed-head"><span>What the user types into the form</span></div>
         <input class="code" id="query" spellcheck="false" autocomplete="off" value="${esc(draft.query)}" aria-label="Form input"></div>
       <div class="island ed"><div class="ed-head"><span>The query the app builds from it</span><small>plain string concatenation</small></div>
@@ -313,7 +315,7 @@ function exerciseView(u, ex, head, label) {
       </aside>
       <div class="bench">
         ${editors}
-        <p class="kbd-hint">Run with the yellow button or ⌘/Ctrl + Enter. Each run happens in a transaction that is rolled back, so nothing you create sticks around.</p>
+        <p class="kbd-hint">Run with the yellow button or ⌘/Ctrl + Enter. ${load ? 'This starts a real load test against Postgres and takes a few seconds.' : 'Each run happens in a transaction that is rolled back, so nothing you create sticks around.'}</p>
         <section class="island out" id="out" aria-live="polite"><p class="out-empty">Run your query to see the rows, the plan and the timing${ex.baseline ? ' against the baseline' : ''}.</p></section>
       </div>
     </div></section>`;
@@ -379,6 +381,8 @@ function resultView(u, ex, r) {
     ? `<p class="note-line">Concept card unlocked: <a href="#/progress/concepts">${esc(u.concept.title)}</a></p>` : '';
   const exp = r.expected;
 
+  if (ex.kind === 'load') return verdict + unlocked + loadView(r);
+
   if (ex.kind === 'inject') {
     const safe = r.safe.error ? `<div class="error">${esc(r.safe.error)}</div>` : table(r.safe);
     return verdict + unlocked + paneTabs([
@@ -402,6 +406,54 @@ function resultView(u, ex, r) {
   if (r.baseline) panes.push(['base', 'Baseline plan', planView(r.baseline.plan)]);
   const setupNote = r.setupMs > 50 ? `<p class="note-line">Setup took ${fmtMs(r.setupMs)} (not counted in the timing).</p>` : '';
   return verdict + unlocked + race + setupNote + paneTabs(panes, rowsOk ? 'plan' : 'rows');
+}
+
+// ---- load-test exercises (kind: load) ----
+
+function loadEditors(ex, draft) {
+  const fixed = Object.entries(ex.fixed).map(([k, v]) => `${k}: ${v}`).join('\n');
+  return `
+      <div class="island ed"><div class="ed-head"><span>Experiment settings</span><small>${ex.tunable.length ? `You can change: ${esc(ex.tunable.join(', '))}` : 'Fixed in this round'}</small></div>
+        ${ex.tunable.length ? `<textarea class="code" id="setup" spellcheck="false" aria-label="Experiment settings">${esc(draft.setup)}</textarea>` : ''}
+        ${fixed ? `<pre class="sql-preview fixed" title="Fixed for this round">${esc(fixed)}</pre>` : ''}</div>
+      <div class="island ed"><div class="ed-head"><span>Each request runs</span><small>${ex.editQuery ? 'Yours to rewrite. It must return the same rows.' : 'Fixed for this round.'}</small></div>
+        <textarea class="code" id="query" spellcheck="false" aria-label="Request SQL" ${ex.editQuery ? '' : 'readonly'}>${esc(draft.query)}</textarea></div>`;
+}
+
+function loadStats(label, u, ex, r) {
+  const m = r?.load?.metrics;
+  return [[label, `${u.number}.${ex.n}`], ['THROUGHPUT', m ? `${Math.round(m.throughput)}/s` : '—'], ['P95 WAIT', fmtMs(m?.wait_p95)],
+    m ? ['FAILED', m.failed, m.failed ? '' : 'ok'] : ['STATUS', passed(ex.id) ? 'solved' : 'open', passed(ex.id) ? 'ok' : '']];
+}
+
+function loadView(r) {
+  const { params: p, metrics: m, samples, firstError } = r.load;
+  const cap = m.total_pool;
+  const cell = (k, v, bad) => `<div class="metric ${bad ? 'bad' : ''}"><small>${k}</small><b>${v}</b></div>`;
+  const grid = [
+    cell('Completed', `${m.completed} of ${m.sent}`),
+    cell('Timed out waiting', m.timeouts, m.timeouts),
+    cell('Refused by Postgres', m.refused, m.refused),
+    cell('Throughput', `${Math.round(m.throughput)} req/s`),
+    cell('Wait for a connection, p95', fmtMs(m.wait_p95)),
+    cell('Wait, median', fmtMs(m.wait_p50)),
+    cell('Time holding it', fmtMs(m.service_ms)),
+    cell('Connections opened', m.connections),
+    cell('Most in use at once', cap ? `${m.peak_in_use} of ${cap}` : m.peak_in_use),
+    cell('Total time', fmtMs(m.total_ms)),
+  ].join('');
+  const law = p.requests ? '' : `<p class="note-line">Little's Law: ${p.rate * p.instances} req/s × ${(m.service_ms / 1000).toFixed(3)} s held = <b>${m.demand.toFixed(1)}</b> connections busy on average${cap ? `, which is ${Math.round(m.demand / cap * 100)}% of the ${cap} available` : ''}.</p>`;
+  // Timeline: connections in use and requests waiting, sampled every 50 ms.
+  const W = 640, H = 130, tMax = Math.max(1, ...samples.map(s => s[0])), vMax = Math.max(1, cap, ...samples.map(s => Math.max(s[1], s[2])));
+  const line = i => samples.map(s => `${(s[0] / tMax * W).toFixed(1)},${(H - 4 - s[i] / vMax * (H - 8)).toFixed(1)}`).join(' ');
+  const capY = (H - 4 - cap / vMax * (H - 8)).toFixed(1);
+  const chart = samples.length < 3 ? '' : `<div class="chart">
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Connections in use and requests waiting over time">
+      ${cap ? `<line x1="0" x2="${W}" y1="${capY}" y2="${capY}" class="cap"/>` : ''}
+      <polyline points="${line(2)}" class="waiting"/><polyline points="${line(1)}" class="in-use"/>
+    </svg>
+    <div class="legend"><span><i style="background:var(--mark)"></i>connections in use</span><span><i style="background:var(--danger)"></i>requests waiting</span>${cap ? `<span><i style="background:var(--muted)"></i>dashed line: pool capacity (${cap})</span>` : ''}<span>0 to ${(tMax / 1000).toFixed(1)} s, peak ${vMax}</span></div></div>`;
+  return `<div class="metrics">${grid}</div>${law}${chart}${firstError ? `<p class="note-line">First error: <code>${esc(firstError)}</code></p>` : ''}`;
 }
 
 function quizView(u, head) {

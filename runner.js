@@ -1,6 +1,7 @@
 // Runs learner SQL against Postgres. Every run happens inside a transaction that is ROLLED BACK,
 // so CREATE INDEX / ALTER TABLE / INSERT in an attempt never leak into the next one.
 import pg from 'pg';
+import { exclusive, loadParams, runLoad } from './loadlab.js';
 
 // Dates, times and intervals come back exactly as Postgres prints them (no JS Date / timezone shifts).
 for (const oid of [1082, 1083, 1114, 1184, 1186, 1266]) pg.types.setTypeParser(oid, v => v);
@@ -176,6 +177,7 @@ const errorOf = (e, where) => ({ error: `${where}: ${e.message}${e.hint ? `\nHin
 
 export async function runExercise(ex, { setup = '', query = '' }) {
   if (ex.kind === 'inject') return runInject(ex, query);
+  if (ex.kind === 'load') return runLoadExercise(ex, setup, query);
   const setupStmts = splitSql(setup), queryStmts = splitSql(query);
   if (queryStmts.length !== 1 || !isSelect(queryStmts[0]))
     return { error: 'The Query box must contain exactly one SELECT (or WITH … SELECT). Put CREATE INDEX, CREATE TABLE etc. in Setup.' };
@@ -239,6 +241,34 @@ async function runInject(ex, input) {
     safe: { ...safeGot, rows: safeGot.rows.slice(0, 200), rowCount: safeGot.rows.length },
     expected: { columns: expected.columns, rows: expected.rows.slice(0, 50), rowCount: expected.rows.length },
   };
+}
+
+// Load test: the learner tunes pool settings (and sometimes the request's SQL); goals are checked on the measurements.
+const OPS = { '<=': (a, b) => a <= b, '>=': (a, b) => a >= b, '<': (a, b) => a < b, '>': (a, b) => a > b, '=': (a, b) => a === b };
+
+async function runLoadExercise(ex, settings, query) {
+  let p, sql = ex.request;
+  const checks = [];
+  try { p = loadParams(ex.params, ex.tunable, settings); } catch (e) { return { error: e.message }; }
+  if (ex.editQuery) {
+    const stmts = splitSql(query);
+    if (stmts.length !== 1 || !isSelect(stmts[0])) return { error: 'The request must be exactly one SELECT.' };
+    sql = stmts[0];
+    try {
+      const [expected, got] = await Promise.all([reference(ex), inRollback(ex.schema, c => fetchRows(c, sql))]);
+      const diff = compareRows(expected, got, ex.ordered);
+      checks.push({ label: 'Same rows as the original request', ok: !diff, detail: diff });
+    } catch (e) { return errorOf(e, 'Request'); }
+  }
+  const load = await exclusive(() => runLoad(p, sql, ex.schema));
+  const values = { ...p, ...load.metrics };
+  for (const g of ex.goals) {
+    const [, name, op, n] = g.expr.match(/^(\w+)\s*(<=|>=|=|<|>)\s*([\d.]+)$/) ?? [];
+    if (!name || !(name in values)) throw new Error(`Bad goal in lesson ${ex.id}: ${g.expr}`);
+    const v = values[name];
+    checks.push({ label: g.msg, ok: OPS[op](v, Number(n)), detail: `${name} = ${Number.isInteger(v) ? v : v.toFixed(1)}` });
+  }
+  return { passed: checks.every(c => c.ok), checks, load: { params: p, ...load } };
 }
 
 // Free-form console: statements run one by one; with `explain`, the last one is EXPLAIN ANALYZEd.

@@ -126,7 +126,7 @@ h1 { font: 700 28px/1.2 var(--display); margin: 0 0 8px; }
 .chalk .fast { color: var(--ink); }
 .chalk .note { position: absolute; right: 8px; bottom: -18px; font: 700 44px var(--hand); color: var(--mark); transform: rotate(-6deg); }
 .chalk .arrow { color: var(--mark); font-family: var(--hand); font-size: 18px; }
-.tracks { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.tracks { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; }
 .track-card { display: block; padding: 22px; color: var(--ink); text-decoration: none; }
 .track-card:hover { border-color: var(--muted); }
 .track-card h2 { font: 700 30px/1.1 var(--hand); margin: 0 0 6px; }
@@ -247,6 +247,21 @@ table.grid td.null { color: var(--muted); font-style: italic; }
 .node.hot .op::after { content: "  ← most time"; color: var(--mark); font-family: var(--hand); }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-top: 10px; }
 .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+
+/* load-test results */
+.metrics { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.metric { padding: 8px 12px; border: 1.5px solid var(--line); border-radius: var(--r1); }
+.metric small { display: block; font-size: 12px; color: var(--muted); }
+.metric b { font: 500 15px var(--mono); }
+.metric.bad { border-color: var(--danger); }
+.metric.bad b { color: var(--danger); }
+.chart svg { display: block; width: 100%; height: auto; background: var(--paper); border: 1.5px solid var(--line); border-radius: var(--r1); }
+.chart polyline { fill: none; stroke-width: 2; stroke-linejoin: round; }
+.chart .in-use { stroke: var(--mark); }
+.chart .waiting { stroke: var(--danger); }
+.chart .cap { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 5 4; }
+.sql-preview.fixed { color: var(--muted); font-size: 13px; }
+textarea.code[readonly] { color: var(--muted); }
 
 /* ---------- quiz ---------- */
 .question { margin: 0 0 28px; }
