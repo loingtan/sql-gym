@@ -198,6 +198,7 @@ textarea.code:focus-visible, input.code:focus-visible { outline: 2px solid var(-
 
 /* output */
 .out { padding: 16px; display: grid; gap: 14px; min-width: 0; }
+.out > * { min-width: 0; }
 .out-empty { color: var(--muted); font-size: 15px; }
 .error { white-space: pre-wrap; padding: 12px 14px; background: var(--danger-bg); color: var(--danger); border-radius: var(--r1); font: 14px/1.5 var(--mono); }
 .verdict { display: flex; gap: 18px; align-items: center; }
@@ -262,6 +263,12 @@ table.grid td.null { color: var(--muted); font-style: italic; }
 .chart .cap { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 5 4; }
 .sql-preview.fixed { color: var(--muted); font-size: 13px; }
 textarea.code[readonly] { color: var(--muted); }
+
+table.timeline td { white-space: normal; max-width: 520px; }
+table.timeline td:first-child, table.timeline td:nth-child(2), table.timeline td:last-child { white-space: nowrap; }
+table.timeline tr.slow td:last-child { color: var(--warn); }
+table.timeline tr.failed td { color: var(--danger); }
+table.timeline .err { font-family: var(--body); }
 
 /* ---------- quiz ---------- */
 .question { margin: 0 0 28px; }

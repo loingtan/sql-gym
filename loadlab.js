@@ -2,12 +2,13 @@
 // An experiment sends requests at Postgres and reports waits, timeouts and refused connections.
 import pg from 'pg';
 import { performance } from 'node:perf_hooks';
+import { substitute } from './racelab.js';
 
 const URL_ = process.env.DATABASE_URL ?? 'postgres://postgres:practice@localhost:5433/practice';
 
-const DEFAULTS = { mode: 'pool', pool_max: 10, timeout_ms: 1000, instances: 1, rate: 50, duration_s: 2, arrivals: 'steady', requests: 0, warm: 'false' };
+const DEFAULTS = { mode: 'pool', pool_max: 10, timeout_ms: 1000, instances: 1, rate: 50, duration_s: 2, arrivals: 'steady', requests: 0, warm: 'false', release: 'always', watch_idle: 'false' };
 const LIMITS = { pool_max: [1, 40], timeout_ms: [50, 5000], instances: [1, 8], rate: [1, 300], duration_s: [0.5, 4], requests: [0, 500] };
-const CHOICES = { mode: ['pool', 'connect'], arrivals: ['steady', 'random'], warm: ['true', 'false'] };
+const CHOICES = { mode: ['pool', 'connect'], arrivals: ['steady', 'random'], warm: ['true', 'false'], release: ['always', 'on_success'], watch_idle: ['true', 'false'] };
 export const LOAD_KEYS = Object.keys(DEFAULTS);
 
 // Lesson defaults, overridden by the learner's "key: value" lines for the keys the lesson allows.
@@ -67,8 +68,15 @@ function arrivalTimes(p, k) {
   return out;
 }
 
-export async function runLoad(p, sql, schema) {
-  const conn = { connectionString: URL_, application_name: 'qg-load', statement_timeout: 10000, options: `-c search_path=${schema},public` };
+export const mainConn = schema => ({ connectionString: URL_, options: `-c search_path=${schema},public` });
+
+// steps: { sql } or { wait: ms }. Waits before the first / after the last statement happen without a connection;
+// waits in between hold it. ":n" in the SQL is the request number.
+export async function runLoad(p, steps, connOpts) {
+  const conn = { ...connOpts, application_name: 'qg-load', statement_timeout: 10000 };
+  const first = steps.findIndex(s => s.sql), last = steps.findLastIndex(s => s.sql);
+  const pause = async part => { for (const s of part) await sleep(s.wait); };
+  const leaked = [], idle = [];
   const waits = [], latency = [], service = [], samples = [];
   let timeouts = 0, refused = 0, errors = 0, firstError = null, connections = 0, inUse = 0, waiting = 0, peak = 0, sent = 0;
   const fail = e => {
@@ -79,18 +87,28 @@ export async function runLoad(p, sql, schema) {
   };
   // A request: get a connection (borrow from the pool, or open a new one), run the SQL, give it back.
   const request = (acquire, giveBack) => async () => {
+    const n = ++sent;
+    await pause(steps.slice(0, first));
     const start = performance.now();
-    sent++; waiting++;
+    waiting++;
     let c;
     try { c = await acquire(); } catch (e) { waiting--; return fail(e); }
     const got = performance.now();
     waiting--; inUse++; peak = Math.max(peak, inUse);
     waits.push(got - start);
     try {
-      await c.query(sql);
+      for (const s of steps.slice(first, last + 1)) await (s.wait ? sleep(s.wait) : c.query(substitute(s.sql, { n })));
       service.push(performance.now() - got);
       latency.push(performance.now() - start);
-    } catch (e) { fail(e); } finally { inUse--; await giveBack(c); }
+    } catch (e) {
+      fail(e);
+      // release: on_success models a handler without try/finally: an error path never returns the connection.
+      if (p.release === 'on_success' && p.mode === 'pool') return leaked.push(c);
+      await c.query('ROLLBACK').catch(() => {});
+    }
+    inUse--;
+    await giveBack(c);
+    await pause(steps.slice(last + 1));
   };
 
   const pools = p.mode === 'pool' ? Array.from({ length: p.instances }, () => {
@@ -115,10 +133,21 @@ export async function runLoad(p, sql, schema) {
       cs.forEach(c => c?.release());
     }
     const t0 = performance.now();
-    const sampler = setInterval(() => samples.push([Math.round(performance.now() - t0), inUse, waiting]), 50);
+    // watch_idle: a monitor session counts our sessions that sit "idle in transaction".
+    const monitor = p.watch_idle === 'true' ? new pg.Client(URL_) : null;
+    await monitor?.connect();
+    let asking = false;
+    const sampler = setInterval(() => {
+      samples.push([Math.round(performance.now() - t0), inUse, waiting]);
+      if (!monitor || asking) return;
+      asking = true;
+      monitor.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE application_name = 'qg-load' AND state = 'idle in transaction'")
+        .then(r => idle.push(r.rows[0].n), () => {}).finally(() => { asking = false; });
+    }, 50);
     if (p.requests) for (let i = 0; i < p.requests; i++) await senders[0]();
     else await Promise.all(senders.flatMap((send, k) => arrivalTimes(p, k).map(t => sleep(t).then(send))));
     clearInterval(sampler);
+    await monitor?.end().catch(() => {});
     const total_ms = performance.now() - t0;
     const service_ms = avg(service);
     return {
@@ -126,6 +155,7 @@ export async function runLoad(p, sql, schema) {
         sent, completed: latency.length, timeouts, refused, errors, failed: timeouts + refused + errors,
         total_ms, throughput: latency.length / (total_ms / 1000),
         wait_p50: pct(waits, 0.5), wait_p95: pct(waits, 0.95), latency_p50: pct(latency, 0.5), latency_p95: pct(latency, 0.95),
+        leaked: leaked.length, idle_in_tx_avg: avg(idle), idle_in_tx_peak: Math.max(0, ...idle),
         service_ms, peak_in_use: peak, connections, total_pool: p.mode === 'pool' ? p.pool_max * p.instances : 0,
         // Little's Law: connections needed on average = arrival rate x time each request holds one
         demand: p.requests ? 1 : p.rate * p.instances * (service_ms / 1000),
@@ -133,6 +163,7 @@ export async function runLoad(p, sql, schema) {
       samples, firstError,
     };
   } finally {
+    leaked.forEach(c => c.release(true));
     await Promise.all(pools.map(pool => pool.end().catch(() => {})));
   }
 }

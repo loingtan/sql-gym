@@ -10,6 +10,7 @@ const ROOT = new URL('./content/', import.meta.url).pathname;
 export const TRACKS = {
   perf: { dir: 'perf', title: 'Performance Lab', schema: 'perf' },
   ap: { dir: 'antipatterns', title: 'Antipatterns', schema: 'bugs' },
+  tx: { dir: 'transactions', title: 'Transactions & Locking', schema: 'perf' },
   pool: { dir: 'pooling', title: 'Connections & Pooling', schema: 'perf' },
 };
 
@@ -57,7 +58,8 @@ function parseExercise(title, tokens, links, unit, n) {
     reference: sql.reference ?? baseline,
     starter: { setup: sql['starter-setup'] ?? '', query: sql.starter ?? baseline ?? sql.request ?? '' },
     solution: { setup: sql['solution-setup'] ?? '', query: sql.solution ?? sql.request ?? '' },
-    // kind: load (see loadlab.js)
+    // kind: load (see loadlab.js) and kind: race (see racelab.js)
+    blocks: sql,
     request: sql.request ?? null,
     editQuery: meta['edit-query'] === 'true',
     tunable,

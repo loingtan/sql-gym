@@ -1,7 +1,8 @@
 // Runs learner SQL against Postgres. Every run happens inside a transaction that is ROLLED BACK,
 // so CREATE INDEX / ALTER TABLE / INSERT in an attempt never leak into the next one.
 import pg from 'pg';
-import { exclusive, loadParams, runLoad } from './loadlab.js';
+import { exclusive, loadParams, mainConn, runLoad } from './loadlab.js';
+import { LAB, prepareLab, runRace } from './racelab.js';
 
 // Dates, times and intervals come back exactly as Postgres prints them (no JS Date / timezone shifts).
 for (const oid of [1082, 1083, 1114, 1184, 1186, 1266]) pg.types.setTypeParser(oid, v => v);
@@ -178,6 +179,7 @@ const errorOf = (e, where) => ({ error: `${where}: ${e.message}${e.hint ? `\nHin
 export async function runExercise(ex, { setup = '', query = '' }) {
   if (ex.kind === 'inject') return runInject(ex, query);
   if (ex.kind === 'load') return runLoadExercise(ex, setup, query);
+  if (ex.kind === 'race') return runRaceExercise(ex, query);
   const setupStmts = splitSql(setup), queryStmts = splitSql(query);
   if (queryStmts.length !== 1 || !isSelect(queryStmts[0]))
     return { error: 'The Query box must contain exactly one SELECT (or WITH … SELECT). Put CREATE INDEX, CREATE TABLE etc. in Setup.' };
@@ -246,11 +248,52 @@ async function runInject(ex, input) {
 // Load test: the learner tunes pool settings (and sometimes the request's SQL); goals are checked on the measurements.
 const OPS = { '<=': (a, b) => a <= b, '>=': (a, b) => a >= b, '<': (a, b) => a < b, '>': (a, b) => a > b, '=': (a, b) => a === b };
 
+// A script is SQL statements plus "\wait 200" lines: the app doing something else for 200 ms.
+function toSteps(text) {
+  const steps = [];
+  let buf = '';
+  const flush = () => { steps.push(...splitSql(buf).map(sql => ({ sql }))); buf = ''; };
+  for (const line of text.split('\n')) {
+    const m = line.match(/^\s*\\wait\s+(\d+)/);
+    if (m) { flush(); steps.push({ wait: Math.min(Number(m[1]), 3000) }); } else buf += `${line}\n`;
+  }
+  flush();
+  return steps;
+}
+
+function goalChecks(ex, values, text) {
+  const checks = ex.goals.map(g => {
+    const [, name, op, n] = g.expr.match(/^(\w+)\s*(<=|>=|=|<|>)\s*([\d.]+)$/) ?? [];
+    if (!name || !(name in values)) throw new Error(`Bad goal in lesson ${ex.id}: ${g.expr}`);
+    const v = values[name];
+    return { label: g.msg, ok: OPS[op](v, Number(n)), detail: `${name} = ${Number.isInteger(v) ? v : v.toFixed(1)}` };
+  });
+  return [...checks, ...ex.require.map(r => ({ label: r.msg, ok: new RegExp(r.re, 'i').test(text) }))];
+}
+
+// Race: the learner's script runs in several sessions at once; the final state of the scratch tables is checked.
+async function runRaceExercise(ex, script) {
+  const steps = toSteps(script);
+  if (!steps.some(s => s.sql)) return { error: 'Write at least one SQL statement.' };
+  const actors = Object.entries(ex.blocks).filter(([k]) => k.startsWith('actor-'))
+    .map(([k, text]) => ({ name: k.slice(6), count: Number(ex.params[k] ?? 1), steps: toSteps(text) }));
+  let race;
+  try {
+    race = await exclusive(() => runRace({
+      init: ex.blocks.init, workers: ex.blocks.workers, script: steps, actors, repeat: Number(ex.params.repeat ?? 1),
+      check: ex.blocks.check, expected: ex.blocks.expected,
+    }));
+  } catch (e) { return { error: e.message }; }
+  const diff = compareRows(race.expected, race.check, true);
+  const checks = [{ label: 'The final state is correct', ok: !diff, detail: diff && 'compare Final state with Expected below' }, ...goalChecks(ex, race.metrics, script)];
+  return { passed: checks.every(c => c.ok), checks, race };
+}
+
 async function runLoadExercise(ex, settings, query) {
   let p, sql = ex.request;
-  const checks = [];
+  const checks = [], script = ex.params.script === 'true';
   try { p = loadParams(ex.params, ex.tunable, settings); } catch (e) { return { error: e.message }; }
-  if (ex.editQuery) {
+  if (ex.editQuery && !script) {
     const stmts = splitSql(query);
     if (stmts.length !== 1 || !isSelect(stmts[0])) return { error: 'The request must be exactly one SELECT.' };
     sql = stmts[0];
@@ -260,14 +303,15 @@ async function runLoadExercise(ex, settings, query) {
       checks.push({ label: 'Same rows as the original request', ok: !diff, detail: diff });
     } catch (e) { return errorOf(e, 'Request'); }
   }
-  const load = await exclusive(() => runLoad(p, sql, ex.schema));
-  const values = { ...p, ...load.metrics };
-  for (const g of ex.goals) {
-    const [, name, op, n] = g.expr.match(/^(\w+)\s*(<=|>=|=|<|>)\s*([\d.]+)$/) ?? [];
-    if (!name || !(name in values)) throw new Error(`Bad goal in lesson ${ex.id}: ${g.expr}`);
-    const v = values[name];
-    checks.push({ label: g.msg, ok: OPS[op](v, Number(n)), detail: `${name} = ${Number.isInteger(v) ? v : v.toFixed(1)}` });
-  }
+  // Scripts commit for real, so they run in the scratch schema as the restricted role.
+  const text = script && ex.editQuery ? query : sql;
+  const steps = toSteps(text);
+  if (!steps.some(s => s.sql)) return { error: 'Write at least one SQL statement.' };
+  const load = await exclusive(async () => {
+    if (script) await prepareLab(ex.blocks.init);
+    return runLoad(p, steps, script ? LAB : mainConn(ex.schema));
+  });
+  checks.push(...goalChecks(ex, { ...p, ...load.metrics }, text));
   return { passed: checks.every(c => c.ok), checks, load: { params: p, ...load } };
 }
 

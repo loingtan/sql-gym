@@ -62,7 +62,7 @@ document.addEventListener('keydown', e => {
 });
 
 const routes = [
-  [/^#\/track\/(perf|ap|pool)$/, trackPage],
+  [/^#\/track\/(perf|ap|pool|tx)$/, trackPage],
   [/^#\/u\/([\w-]+)(?:\/(ex\/\d+|quiz))?$/, unitPage],
   [/^#\/console$/, consolePage],
   [/^#\/progress(?:\/(concepts))?$/, progressPage],
@@ -171,8 +171,8 @@ function homePage() {
     const ex = content.units.filter(u => u.track === track).flatMap(u => u.exercises);
     return [ex.filter(e => passed(e.id)).length, ex.length, content.units.filter(u => u.track === track).length];
   };
-  const [pd, pt, pn] = tally('perf'), [ad, at, an] = tally('ap'), [ld, lt, ln] = tally('pool');
-  setBar({ stats: [['SOLVED', `${pd + ad + ld}/${pt + at + lt}`], ['CONCEPTS', `${content.units.filter(unitDone).length}/${content.units.length}`]] });
+  const [pd, pt, pn] = tally('perf'), [ad, at, an] = tally('ap'), [ld, lt, ln] = tally('pool'), [xd, xt, xn] = tally('tx');
+  setBar({ stats: [['SOLVED', `${pd + ad + ld + xd}/${pt + at + lt + xt}`], ['CONCEPTS', `${content.units.filter(unitDone).length}/${content.units.length}`]] });
   const next = content.units.flatMap(u => u.exercises).find(e => !passed(e.id));
   const card = (track, title, text, done, total) => `
     <a class="island track-card" href="#/track/${track}">
@@ -198,6 +198,7 @@ function homePage() {
         ${card('perf', 'Performance Lab', `${pn} rounds on 1M orders and 2.5M order items with no secondary indexes. Find the slow step in the plan, fix it, beat the baseline.`, pd, pt)}
         ${card('ap', 'Antipatterns', `${an} chapters of SQL Antipatterns. Read the theory, then fix the query or the schema on the book's bug-tracker database.`, ad, at)}
         ${card('pool', 'Connections & Pooling', `${ln} rounds of real load tests. Open connections, exhaust a pool, watch the queue, and size it with Little's Law.`, ld, lt)}
+        ${card('tx', 'Transactions & Locking', `${xn} rounds where several real sessions run your script at once. Lost updates, isolation levels, deadlocks, job queues and finding who holds the lock.`, xd, xt)}
       </div>
       <div class="home-actions">
         ${next ? `<a class="run small" href="#/u/${next.unitId}/ex/${next.n}">Continue: ${esc(next.title)}</a>` : ''}
@@ -211,6 +212,7 @@ function homePage() {
 
 const TRACK_INTRO = {
   perf: 'Big tables, no secondary indexes and a stopwatch. Each round explains one idea, then hands you a slow query: return the same rows, many times faster.',
+  tx: 'What happens when many sessions touch the same rows. In each round several real database sessions run your script at the same moment on scratch tables, and the final state has to be right.',
   pool: 'What a connection costs and how a pool behaves under load. Each round runs a real load test against Postgres: you change the pool settings or the query, and the numbers have to meet the goals.',
   ap: 'Each chapter follows the book: the goal, the antipattern, how to spot it, when it is fine, and the fix. Then you practice on the bug-tracker database.',
 };
@@ -273,13 +275,15 @@ function unitPage(id, sub) {
 function exerciseView(u, ex, head, label) {
   const key = `qg:draft:${ex.id}`;
   const draft = store.get(key) ?? { setup: ex.starter.setup, query: ex.starter.query };
-  const inject = ex.kind === 'inject', load = ex.kind === 'load';
+  const inject = ex.kind === 'inject', load = ex.kind === 'load', race = ex.kind === 'race';
   const best = progress.get(ex.id);
-  const stats = r => load ? loadStats(label, u, ex, r) : ex.baseline
+  const stats = r => load ? loadStats(label, u, ex, r) : race ? raceStats(label, u, ex, r) : ex.baseline
     ? [[label, `${u.number}.${ex.n}`], ['BASELINE', fmtMs(r?.baseline?.ms)], ['YOURS', fmtMs(r?.ms)],
        r ? ['SPEEDUP', fmtX(r.speedup), r.passed ? 'big' : ''] : ['BEST', best?.best_speedup ? fmtX(best.best_speedup) : '—', best ? 'ok' : '']]
     : [[label, `${u.number}.${ex.n}`], ['TIME', fmtMs(r?.ms)], ['ROWS', r && !r.error ? fmtN(r.rowCount) : '—'], ['STATUS', passed(ex.id) ? 'solved' : 'open', passed(ex.id) ? 'ok' : '']];
-  const goals = load ? [...(ex.editQuery ? ['Return the same rows as the original request'] : []), ...ex.goals.map(g => g.msg)] : [
+  const goals = load || race ? [
+    ...(race ? ['The final state is correct'] : ex.editQuery && ex.params.script !== 'true' ? ['Return the same rows as the original request'] : []),
+    ...ex.goals.map(g => g.msg), ...ex.require.map(r => r.msg)] : [
     inject ? 'Make the unsafe query return the target rows' : 'Return the same rows as the expected result',
     ex.speedup && `Be at least ${ex.speedup}× faster than the baseline`,
     ...ex.forbid.map(f => `No ${f} in the plan`),
@@ -287,7 +291,7 @@ function exerciseView(u, ex, head, label) {
     ex.ordered && 'Row order matters',
   ].filter(Boolean);
 
-  const editors = load ? loadEditors(ex, draft) : inject ? `
+  const editors = load ? loadEditors(ex, draft) : race ? raceEditors(ex, draft) : inject ? `
       <div class="island ed"><div class="ed-head"><span>What the user types into the form</span></div>
         <input class="code" id="query" spellcheck="false" autocomplete="off" value="${esc(draft.query)}" aria-label="Form input"></div>
       <div class="island ed"><div class="ed-head"><span>The query the app builds from it</span><small>plain string concatenation</small></div>
@@ -315,7 +319,7 @@ function exerciseView(u, ex, head, label) {
       </aside>
       <div class="bench">
         ${editors}
-        <p class="kbd-hint">Run with the yellow button or ⌘/Ctrl + Enter. ${load ? 'This starts a real load test against Postgres and takes a few seconds.' : 'Each run happens in a transaction that is rolled back, so nothing you create sticks around.'}</p>
+        <p class="kbd-hint">Run with the yellow button or ⌘/Ctrl + Enter. ${load ? 'This starts a real load test against Postgres and takes a few seconds.' : race ? 'This runs your script in several real database sessions at the same time, on scratch tables that are rebuilt for every run.' : 'Each run happens in a transaction that is rolled back, so nothing you create sticks around.'}</p>
         <section class="island out" id="out" aria-live="polite"><p class="out-empty">Run your query to see the rows, the plan and the timing${ex.baseline ? ' against the baseline' : ''}.</p></section>
       </div>
     </div></section>`;
@@ -382,6 +386,7 @@ function resultView(u, ex, r) {
   const exp = r.expected;
 
   if (ex.kind === 'load') return verdict + unlocked + loadView(r);
+  if (ex.kind === 'race') return verdict + unlocked + raceView(r);
 
   if (ex.kind === 'inject') {
     const safe = r.safe.error ? `<div class="error">${esc(r.safe.error)}</div>` : table(r.safe);
@@ -441,6 +446,8 @@ function loadView(r) {
     cell('Connections opened', m.connections),
     cell('Most in use at once', cap ? `${m.peak_in_use} of ${cap}` : m.peak_in_use),
     cell('Total time', fmtMs(m.total_ms)),
+    ...(p.release === 'on_success' || m.leaked ? [cell('Connections leaked', m.leaked, m.leaked)] : []),
+    ...(p.watch_idle === 'true' ? [cell('Idle in transaction, average', m.idle_in_tx_avg.toFixed(1), m.idle_in_tx_avg > 2)] : []),
   ].join('');
   const law = p.requests ? '' : `<p class="note-line">Little's Law: ${p.rate * p.instances} req/s × ${(m.service_ms / 1000).toFixed(3)} s held = <b>${m.demand.toFixed(1)}</b> connections busy on average${cap ? `, which is ${Math.round(m.demand / cap * 100)}% of the ${cap} available` : ''}.</p>`;
   // Timeline: connections in use and requests waiting, sampled every 50 ms.
@@ -454,6 +461,40 @@ function loadView(r) {
     </svg>
     <div class="legend"><span><i style="background:var(--mark)"></i>connections in use</span><span><i style="background:var(--danger)"></i>requests waiting</span>${cap ? `<span><i style="background:var(--muted)"></i>dashed line: pool capacity (${cap})</span>` : ''}<span>0 to ${(tMax / 1000).toFixed(1)} s, peak ${vMax}</span></div></div>`;
   return `<div class="metrics">${grid}</div>${law}${chart}${firstError ? `<p class="note-line">First error: <code>${esc(firstError)}</code></p>` : ''}`;
+}
+
+// ---- race exercises (kind: race): several sessions run the learner's script at once ----
+
+function raceEditors(ex, draft) {
+  const actors = Object.entries(ex.blocks).filter(([k]) => k.startsWith('actor-'));
+  const times = Number(ex.params.repeat ?? 1);
+  return `
+      <details class="island ed"><summary><span>The tables</span><small>Rebuilt before every run</small></summary>
+        <pre class="sql-preview fixed">${esc(ex.blocks.init ?? '')}</pre></details>
+      ${actors.map(([k, sql]) => `<details class="island ed" open><summary><span>Meanwhile: ${esc(k.slice(6))}${ex.params[k] > 1 ? ` × ${esc(ex.params[k])}` : ''}</span><small>Another session, running at the same time. Fixed.</small></summary>
+        <pre class="sql-preview fixed">${esc(sql)}</pre></details>`).join('')}
+      <div class="island ed"><div class="ed-head"><span>Your script</span><small>Every worker runs it in its own session${times > 1 ? `, ${times} times` : ''}</small></div>
+        <textarea class="code" id="query" spellcheck="false" aria-label="Your script">${esc(draft.query)}</textarea></div>`;
+}
+
+function raceStats(label, u, ex, r) {
+  const m = r?.race?.metrics;
+  return [[label, `${u.number}.${ex.n}`], ['WORKERS', m?.workers ?? '—'], ['TIME', fmtMs(m?.total_ms)],
+    m ? ['ERRORS', m.errors, m.errors ? '' : 'ok'] : ['STATUS', passed(ex.id) ? 'solved' : 'open', passed(ex.id) ? 'ok' : '']];
+}
+
+function raceView(r) {
+  const { check, expected, events, errors } = r.race;
+  const ok = r.checks[0].ok;
+  const state = `<div class="result-block"><h4>Final state</h4>${table({ ...check, rowCount: check.rows.length })}</div>`
+    + (ok ? '' : `<div class="result-block"><h4>Expected</h4>${table({ columns: check.columns, rows: expected.rows, rowCount: expected.rows.length })}</div>`);
+  const errs = errors.length ? `<div class="error">${errors.map(e => esc(`${e.who}: ${e.message}`)).join('\n')}</div>` : '';
+  const oneLine = s => s.replace(/\s+/g, ' ');
+  const timeline = `<div class="table-wrap"><table class="grid timeline">
+    <thead><tr><th>started</th><th>session</th><th>statement</th><th>took</th></tr></thead>
+    <tbody>${events.map(e => `<tr class="${e.error ? 'failed' : e.ms > 50 ? 'slow' : ''}"><td>${Math.round(e.t)} ms</td><td>${esc(e.who)}</td><td>${esc(oneLine(e.sql))}${e.error ? `<br><span class="err">${esc(e.error)}</span>` : ''}</td><td>${fmtMs(e.ms)}</td></tr>`).join('')}</tbody></table></div>
+    <p class="note-line">Every statement of every session, in the order it started. A long "took" on a short statement means it was waiting for a lock.</p>`;
+  return paneTabs([['state', 'Result', state + errs], ['timeline', `Timeline (${events.length})`, timeline]], 'state');
 }
 
 function quizView(u, head) {
